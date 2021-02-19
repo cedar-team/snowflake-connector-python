@@ -22,7 +22,7 @@ from .network import CONTENT_TYPE_APPLICATION_JSON, EXTERNAL_BROWSER_AUTHENTICAT
 logger = logging.getLogger(__name__)
 
 BUF_SIZE = 16384
-ENABLE_SOCKET = os.environ.get('SNOWFLAKE_EXTERNALBROWSER_USE_SOCKET', '').lower() == 'true'
+USE_UNIX_SOCKET = os.environ.get('SNOWFLAKE_EXTERNALBROWSER_USE_UNIX_SOCKET', '').lower() == 'true'
 UNIX_SOCKET = os.environ.get('SNOWFLAKE_EXTERNALBROWSER_UNIX_SOCKET', '/var/run/snowflake/sock')
 CALLBACK_PORT = os.environ.get('SNOWFLAKE_EXTERNALBROWSER_CALLBACK_PORT', 4433)
 
@@ -76,15 +76,16 @@ class AuthByWebBrowser(AuthByPlugin):
         # the assertion.
         _ = password  # noqa: F841
 
-        if ENABLE_SOCKET:
+        if USE_UNIX_SOCKET:
             socket_connection = self._socket(socket.AF_UNIX, socket.SOCK_STREAM)
         else:
             socket_connection = self._socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            if ENABLE_SOCKET:
+            if USE_UNIX_SOCKET:
                 try:
                     socket_connection.bind(UNIX_SOCKET)
                     os.chmod(UNIX_SOCKET, 666)
+                    callback_port = CALLBACK_PORT
                 except OSError:
                     raise OperationalError(
                         msg='{} is already in use. Ensure there is no other '
@@ -94,6 +95,11 @@ class AuthByWebBrowser(AuthByPlugin):
             else:
                 try:
                     socket_connection.bind(('localhost', 0))
+                    callback_port = socket_connection.getsockname()[1]
+                    print("Initiating login request with your identity provider. A "
+                          "browser window should have opened for you to complete the "
+                          "login. If you can't see it, check existing browser windows, "
+                          "or your OS settings. Press CTRL+C to abort and try again...")
                 except socket.gaierror as ex:
                     if ex.args[0] == socket.EAI_NONAME:
                         raise OperationalError(
@@ -104,26 +110,18 @@ class AuthByWebBrowser(AuthByPlugin):
                     else:
                         raise ex
             socket_connection.listen(0)  # no backlog
-            if ENABLE_SOCKET:
-                callback_port = CALLBACK_PORT
-            else:
-                callback_port = socket_connection.getsockname()[1]
-                print("Initiating login request with your identity provider. A "
-                      "browser window should have opened for you to complete the "
-                      "login. If you can't see it, check existing browser windows, "
-                      "or your OS settings. Press CTRL+C to abort and try again...")
 
             logger.debug('step 1: query GS to obtain SSO url')
             sso_url = self._get_sso_url(
                 authenticator, service_name, account, callback_port, user)
 
             logger.debug('step 2: open a browser')
-            if ENABLE_SOCKET:
+            if USE_UNIX_SOCKET:
                 print(
                     'Click the link below to authenticate to Snowflake using '
                     'Okta (opens new browser window).\nIf the page does not '
                     'redirect in 1 second after successful Okta auth, close '
-                    'the window and try the link again.\n"
+                    'the window and try the link again.\n'
                 )
                 print(sso_url)
             else:
@@ -141,7 +139,7 @@ class AuthByWebBrowser(AuthByPlugin):
             self._receive_saml_token(socket_connection)
         finally:
             socket_connection.close()
-            if ENABLE_SOCKET:
+            if USE_UNIX_SOCKET:
                 os.unlink(UNIX_SOCKET)
 
     def _receive_saml_token(self, socket_connection):
