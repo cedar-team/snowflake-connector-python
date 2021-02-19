@@ -4,6 +4,7 @@
 # Copyright (c) 2012-2021 Snowflake Computing Inc. All right reserved.
 #
 
+import os
 import json
 import logging
 import socket
@@ -14,14 +15,16 @@ from .auth import Auth
 from .auth_by_plugin import AuthByPlugin
 from .compat import parse_qs, urlparse, urlsplit
 from .constants import HTTP_HEADER_ACCEPT, HTTP_HEADER_CONTENT_TYPE, HTTP_HEADER_SERVICE_NAME, HTTP_HEADER_USER_AGENT
-from .errorcode import ER_IDP_CONNECTION_ERROR, ER_NO_HOSTNAME_FOUND, ER_UNABLE_TO_OPEN_BROWSER
+from .errorcode import ER_IDP_CONNECTION_ERROR, ER_NO_HOSTNAME_FOUND, ER_UNABLE_TO_OPEN_BROWSER, ER_UNIX_SOCKET_CONFLICT
 from .errors import OperationalError
 from .network import CONTENT_TYPE_APPLICATION_JSON, EXTERNAL_BROWSER_AUTHENTICATOR, PYTHON_CONNECTOR_USER_AGENT
 
 logger = logging.getLogger(__name__)
 
 BUF_SIZE = 16384
-
+ENABLE_SOCKET = os.environ.get('SNOWFLAKE_EXTERNALBROWSER_USE_SOCKET', '').lower() == 'true'
+UNIX_SOCKET = os.environ.get('SNOWFLAKE_EXTERNALBROWSER_UNIX_SOCKET', '/var/run/snowflake/sock')
+CALLBACK_PORT = os.environ.get('SNOWFLAKE_EXTERNALBROWSER_CALLBACK_PORT', 4433)
 
 # global state of web server that receives the SAML assertion from
 # Snowflake server
@@ -73,46 +76,73 @@ class AuthByWebBrowser(AuthByPlugin):
         # the assertion.
         _ = password  # noqa: F841
 
-        socket_connection = self._socket(socket.AF_INET, socket.SOCK_STREAM)
+        if ENABLE_SOCKET:
+            socket_connection = self._socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        else:
+            socket_connection = self._socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            try:
-                socket_connection.bind(('localhost', 0))
-            except socket.gaierror as ex:
-                if ex.args[0] == socket.EAI_NONAME:
+            if ENABLE_SOCKET:
+                try:
+                    socket_connection.bind(UNIX_SOCKET)
+                    os.chmod(UNIX_SOCKET, 666)
+                except OSError:
                     raise OperationalError(
-                        msg='localhost is not found. Ensure /etc/hosts has '
-                            'localhost entry.',
-                        errno=ER_NO_HOSTNAME_FOUND
+                        msg='{} is already in use. Ensure there is no other '
+                        'process using the location'.format(UNIX_SOCKET),
+                        errno=ER_UNIX_SOCKET_CONFLICT
                     )
-                else:
-                    raise ex
+            else:
+                try:
+                    socket_connection.bind(('localhost', 0))
+                except socket.gaierror as ex:
+                    if ex.args[0] == socket.EAI_NONAME:
+                        raise OperationalError(
+                            msg='localhost is not found. Ensure /etc/hosts has '
+                                'localhost entry.',
+                            errno=ER_NO_HOSTNAME_FOUND
+                        )
+                    else:
+                        raise ex
             socket_connection.listen(0)  # no backlog
-            callback_port = socket_connection.getsockname()[1]
-
-            print("Initiating login request with your identity provider. A "
-                  "browser window should have opened for you to complete the "
-                  "login. If you can't see it, check existing browser windows, "
-                  "or your OS settings. Press CTRL+C to abort and try again...")
+            if ENABLE_SOCKET:
+                callback_port = CALLBACK_PORT
+            else:
+                callback_port = socket_connection.getsockname()[1]
+                print("Initiating login request with your identity provider. A "
+                      "browser window should have opened for you to complete the "
+                      "login. If you can't see it, check existing browser windows, "
+                      "or your OS settings. Press CTRL+C to abort and try again...")
 
             logger.debug('step 1: query GS to obtain SSO url')
             sso_url = self._get_sso_url(
                 authenticator, service_name, account, callback_port, user)
 
             logger.debug('step 2: open a browser')
-            if not self._webbrowser.open_new(sso_url):
-                logger.error(
-                    'Unable to open a browser in this environment.',
-                    exc_info=True)
-                self.handle_failure({
-                    'code': ER_UNABLE_TO_OPEN_BROWSER,
-                    'message': "Unable to open a browser in this environment."
-                })
-                return  # required for test case
+            if ENABLE_SOCKET:
+                print(
+                    'Click the link below to authenticate to Snowflake using '
+                    'Okta (opens new browser window).\nIf the page does not '
+                    'redirect in 1 second after successful Okta auth, close '
+                    'the window and try the link again.\n"
+                )
+                print(sso_url)
+            else:
+                if not self._webbrowser.open_new(sso_url):
+                    logger.error(
+                        'Unable to open a browser in this environment.',
+                        exc_info=True)
+                    self.handle_failure({
+                        'code': ER_UNABLE_TO_OPEN_BROWSER,
+                        'message': "Unable to open a browser in this environment."
+                    })
+                    return  # required for test case
 
             logger.debug('step 3: accept SAML token')
             self._receive_saml_token(socket_connection)
         finally:
             socket_connection.close()
+            if ENABLE_SOCKET:
+                os.unlink(UNIX_SOCKET)
 
     def _receive_saml_token(self, socket_connection):
         """Receives SAML token from web browser."""
