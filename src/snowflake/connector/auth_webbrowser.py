@@ -83,6 +83,8 @@ class AuthByWebBrowser(AuthByPlugin):
         try:
             if USE_UNIX_SOCKET:
                 try:
+                    if os.path.isfile(UNIX_SOCKET):
+                        os.unlink(UNIX_SOCKET)
                     socket_connection.bind(UNIX_SOCKET)
                     os.chmod(UNIX_SOCKET, 666)
                     callback_port = CALLBACK_PORT
