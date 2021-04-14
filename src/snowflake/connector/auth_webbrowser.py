@@ -83,7 +83,7 @@ class AuthByWebBrowser(AuthByPlugin):
         try:
             if USE_UNIX_SOCKET:
                 try:
-                    if os.path.isfile(UNIX_SOCKET):
+                    if os.path.exists(UNIX_SOCKET):
                         os.unlink(UNIX_SOCKET)
                     socket_connection.bind(UNIX_SOCKET)
                     os.chmod(UNIX_SOCKET, 666)
@@ -142,7 +142,8 @@ class AuthByWebBrowser(AuthByPlugin):
         finally:
             socket_connection.close()
             if USE_UNIX_SOCKET:
-                os.unlink(UNIX_SOCKET)
+                if os.path.exists(UNIX_SOCKET):
+                    os.unlink(UNIX_SOCKET)
 
     def _receive_saml_token(self, socket_connection):
         """Receives SAML token from web browser."""
